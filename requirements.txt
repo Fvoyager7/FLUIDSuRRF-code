@@ -1,0 +1,42 @@
+# Python dependencies for FLUIDSuRRF-code (ICESat-2 supraglacial lake detection)
+# Cross-platform (pip) replacement for the macOS-only conda environment.yml.
+# Targets the core detection pipeline (icelakes/ + detect_lakes.py) and the
+# simple-image-labeler Streamlit app.
+
+# --- core detection pipeline (icelakes/, detect_lakes.py) ---
+numpy
+pandas
+geopandas
+shapely
+fiona
+scikit-learn
+scipy
+matplotlib
+cmcrameri
+h5py
+requests
+rsa
+
+# --- simple-image-labeler streamlit app ---
+streamlit
+pillow
+# 0.1.9 provides the add_keyboard_shortcuts(dict) API used by image_labeler.py
+# (renamed to add_shortcuts(**kwargs) in >=1.0.0)
+streamlit-shortcuts==0.1.9
+
+# --- notebooks / lakeanalysis extras (Sentinel-2 + Google Earth Engine) ---
+rioxarray
+rasterio
+xarray
+dask
+netcdf4
+folium
+ipyleaflet
+geopy
+mapclassify
+statsmodels
+tqdm
+earthengine-api
+pyproj
+jupyter
+ipympl

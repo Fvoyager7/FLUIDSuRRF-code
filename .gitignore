@@ -11,4 +11,9 @@ singularity_container/icelake-container_v1.sif
 *.DS_Store
 detection_out_plot/
 detection_out_data/
+detection_out_stat/
 success.txt
+
+# Python virtual environment (dev setup)
+.venv/
+IS2data/
