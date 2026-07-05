@@ -19,8 +19,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--geojson', default='simplified_GRE_2000_SW.geojson',
                         help='GeoJSON filename inside geojsons/')
-    parser.add_argument('--start-date', default='2022-05-01')
-    parser.add_argument('--end-date', default='2022-09-30')
+    parser.add_argument('--start-date', default='2022-06-01')
+    parser.add_argument('--end-date', default='2022-08-31')
     parser.add_argument('--icesheet', default='GrIS')
     parser.add_argument('--meltseason', default='2022')
     parser.add_argument('--out-csv', default='granule_lists/GrIS_2022_GRE_2000_SW.csv')
