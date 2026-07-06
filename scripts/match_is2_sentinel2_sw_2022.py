@@ -57,25 +57,43 @@ def query_sentinel2(bbox: list[float], start: datetime, end: datetime, cloud_cov
 
 
 def best_match(is2_time: datetime, features: list[dict]) -> dict | None:
+    """Pick the most useful Sentinel-2 scene for optical validation.
+
+    Selection priority (best for supraglacial-lake validation):
+      1. same UTC day as the ICESat-2 overpass
+      2. lower cloud cover
+      3. smaller absolute time difference
+
+    Rationale: for lake validation a clear same-day scene is far more useful
+    than a temporally-closer but cloudy scene. This matters for pre-dawn
+    ICESat-2 overpasses, where the temporally-nearest scene can fall on the
+    previous day while the same-day (afternoon) scene is cloud-free.
+    """
     if not features:
         return None
 
-    best = None
-    best_abs_seconds = None
+    candidates = []
     for feature in features:
         props = feature.get('properties', {})
         s2_time = datetime.fromisoformat(props['datetime'].replace('Z', '+00:00'))
         abs_seconds = abs((s2_time - is2_time).total_seconds())
-        if best is None or abs_seconds < best_abs_seconds:
-            best = {
-                's2_id': feature.get('id'),
-                's2_time': s2_time,
-                'timediff_hours': abs_seconds / 3600.0,
-                'same_day': s2_time.date() == is2_time.date(),
-                'cloud_cover': props.get('eo:cloud_cover'),
-                'platform': props.get('platform'),
-            }
-            best_abs_seconds = abs_seconds
+        cloud = props.get('eo:cloud_cover')
+        candidates.append({
+            's2_id': feature.get('id'),
+            's2_time': s2_time,
+            'timediff_hours': abs_seconds / 3600.0,
+            'same_day': s2_time.date() == is2_time.date(),
+            'cloud_cover': cloud,
+            'platform': props.get('platform'),
+            '_abs_seconds': abs_seconds,
+            '_cloud_sort': cloud if cloud is not None else 999.0,
+        })
+
+    # same-day first (True sorts before False via not), then low cloud, then time
+    candidates.sort(key=lambda c: (not c['same_day'], c['_cloud_sort'], c['_abs_seconds']))
+    best = candidates[0]
+    best.pop('_abs_seconds', None)
+    best.pop('_cloud_sort', None)
     return best
 
 
