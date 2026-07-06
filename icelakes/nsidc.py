@@ -14,8 +14,229 @@ from xml.etree import ElementTree as ET
 from icelakes.utilities import get_size
 
 
+def _make_earthdata_session(uid, pwd):
+    """Authenticated requests session; trust_env=False avoids stale local proxy (e.g. 127.0.0.1:7897)."""
+    session = requests.Session()
+    session.trust_env = False
+    session.auth = requests.auth.HTTPBasicAuth(uid, pwd)
+    session.headers.update({'User-Agent': 'FLUIDSuRRF-icelakes/1.0 (requests)'})
+    try:
+        session.get('https://urs.earthdata.nasa.gov/home', timeout=30)
+    except requests.RequestException:
+        pass
+    return session
+
+
+def _print_earthdata_401_help():
+    print('\nEarthdata login failed (401 Unauthorized). Please check:')
+    print('  1. Username and password in ed/edcreds.py (log in at https://urs.earthdata.nasa.gov to verify).')
+    print('  2. Authorize NSIDC data access for your account:')
+    print('     https://urs.earthdata.nasa.gov/approve_app')
+    print('     (approve applications related to NSIDC / ICESat-2).')
+    print('  3. In a browser, open https://nsidc.org/data/atl03 and accept the data use agreement.\n')
+
+
+def _download_url_earthdata(session, url, out_path, connect_timeout=30, read_timeout=7200, resume=True):
+    """Stream download with Earthdata auth session; supports HTTP Range resume. Returns HTTP status code."""
+    partial_bytes = 0
+    if resume and os.path.exists(out_path):
+        partial_bytes = os.path.getsize(out_path)
+        if partial_bytes > 0:
+            print('Resuming download from %s (%s already on disk)...' % (out_path, get_size(out_path)))
+
+    headers = {}
+    if partial_bytes > 0:
+        headers['Range'] = 'bytes=%i-' % partial_bytes
+
+    print('Connecting to Earthdata Cloud (first bytes may take 1–3 min)...')
+    with session.get(url, stream=True, allow_redirects=True, headers=headers,
+                     timeout=(connect_timeout, read_timeout)) as r:
+        if r.status_code == 401:
+            _print_earthdata_401_help()
+            return 401
+        if r.status_code == 416:
+            # Range not satisfiable — file may already be complete
+            return 200
+        if r.status_code not in (200, 206):
+            print('Download failed with HTTP status:', r.status_code)
+            print('Final URL:', r.url)
+            return r.status_code
+
+        if r.status_code == 200 and partial_bytes > 0:
+            print('Server did not honor resume; restarting download from scratch.')
+            partial_bytes = 0
+
+        content_length = int(r.headers.get('content-length', 0))
+        if r.status_code == 206:
+            total = partial_bytes + content_length
+            downloaded = partial_bytes
+            mode = 'ab'
+        else:
+            total = content_length
+            downloaded = 0
+            mode = 'wb'
+
+        with open(out_path, mode) as f:
+            for chunk in r.iter_content(chunk_size=8 * 1024 * 1024):
+                if not chunk:
+                    continue
+                f.write(chunk)
+                downloaded += len(chunk)
+                if total > 0:
+                    print('  %.1f / %.1f MB' % (downloaded / 1e6, total / 1e6), end='\r', flush=True)
+                else:
+                    print('  %.1f MB' % (downloaded / 1e6), end='\r', flush=True)
+    print()
+    return 200
+
+
+def _try_earthaccess_download(granule_id, granule_output_path, uid, pwd, data_url=None):
+    """Login via earthaccess, then single-thread stream download (avoids pqdm hang on Windows)."""
+    try:
+        import earthaccess
+        from earthaccess.exceptions import LoginAttemptFailure, LoginStrategyUnavailable
+    except ImportError:
+        print('Tip: pip install earthaccess may help Earthdata Cloud downloads in some network regions.')
+        return None
+
+    if not os.path.exists(granule_output_path):
+        os.makedirs(granule_output_path)
+
+    out_path = os.path.join(granule_output_path, granule_id)
+    if os.path.exists(out_path):
+        ok, msg = verify_local_granule(out_path, granule_id)
+        if ok:
+            print('Granule already downloaded: %s (%s)' % (out_path, get_size(out_path)))
+            return out_path, 200
+        print(msg)
+        if os.path.getsize(out_path) > 0:
+            print('Will attempt to resume partial download (HTTP Range)...')
+        else:
+            os.remove(out_path)
+
+    if data_url is None:
+        granule_search_url = 'https://cmr.earthdata.nasa.gov/search/granules'
+        search_params = {
+            'short_name': 'ATL03',
+            'page_size': 1,
+            'page_num': 1,
+            'producer_granule_id': granule_id,
+        }
+        response = requests.get(granule_search_url, params=search_params,
+                                headers={'Accept': 'application/json'}, timeout=60)
+        entries = json.loads(response.content).get('feed', {}).get('entry', [])
+        if not entries:
+            print('No granule found in CMR for %s' % granule_id)
+            return None
+        links = entries[0].get('links', [])
+        data_urls = [l['href'] for l in links
+                     if str(l.get('rel', '')).endswith('/data#') and str(l.get('href', '')).startswith('http')]
+        for url in data_urls:
+            if 'earthdatacloud' in url:
+                data_url = url
+                break
+        if data_url is None and data_urls:
+            data_url = data_urls[0]
+        if data_url is None:
+            print('No HTTPS data link found in CMR metadata.')
+            return None
+
+    print('Downloading via earthaccess (single-thread stream, ~1.4 GB may take 10–60 min)...')
+    print(' ', data_url)
+    os.environ['EARTHDATA_USERNAME'] = uid
+    os.environ['EARTHDATA_PASSWORD'] = pwd
+    try:
+        auth = earthaccess.login(strategy='environment', persist=False)
+    except LoginAttemptFailure as e:
+        print('earthaccess.login failed (wrong username/password?):')
+        print(' ', str(e).split('\n')[0][:200])
+        _print_earthdata_401_help()
+        return None
+    except LoginStrategyUnavailable as e:
+        print('earthaccess.login failed:', e)
+        return None
+
+    if not auth.authenticated:
+        print('earthaccess.login failed; check ed/edcreds.py.')
+        _print_earthdata_401_help()
+        return None
+
+    # Pre-authorize NSIDC cloud URL (sets cookies for protected bucket)
+    try:
+        earthaccess.__store__.set_requests_session(data_url, method='head')
+    except Exception as e:
+        print('Warning: pre-authorize data URL failed:', e)
+
+    session = earthaccess.get_requests_https_session()
+    session.trust_env = False
+    status = _download_url_earthdata(session, data_url, out_path,
+                                     connect_timeout=30, read_timeout=7200, resume=True)
+    if status != 200:
+        return None
+
+    ok, msg = verify_local_granule(out_path, granule_id)
+    if not ok:
+        print(msg)
+        return None
+
+    print('File to process: %s (%s)' % (out_path, get_size(out_path)))
+    return out_path, 200
+
+
+def get_cmr_granule_size_mb(granule_id):
+    """Return CMR granule_size (MB) for a producer granule id."""
+    granule_search_url = 'https://cmr.earthdata.nasa.gov/search/granules'
+    search_params = {
+        'short_name': 'ATL03',
+        'page_size': 1,
+        'page_num': 1,
+        'producer_granule_id': granule_id,
+    }
+    response = requests.get(granule_search_url, params=search_params,
+                            headers={'Accept': 'application/json'}, timeout=60)
+    entries = json.loads(response.content).get('feed', {}).get('entry', [])
+    if not entries:
+        return None
+    return float(entries[0]['granule_size'])
+
+
+def verify_local_granule(filepath, granule_id):
+    """Check local ATL03 .h5 exists, size matches CMR, and HDF5 opens."""
+    if not os.path.isfile(filepath):
+        return False, 'File not found: %s' % filepath
+
+    local_size = os.path.getsize(filepath)
+    expected_mb = get_cmr_granule_size_mb(granule_id)
+    if expected_mb is not None:
+        expected_bytes = int(expected_mb * 1024 * 1024)
+        if local_size < expected_bytes * 0.98:
+            return False, (
+                'Incomplete download: %s is %s but CMR expects ~%.0f MB.\n'
+                '  Delete this file and download again (browser or script).'
+                % (filepath, get_size(filepath), expected_mb)
+            )
+
+    try:
+        import h5py
+        with h5py.File(filepath, 'r'):
+            pass
+    except OSError as e:
+        return False, 'Corrupt/incomplete HDF5: %s\n  %s\n  Delete and re-download.' % (filepath, e)
+
+    return True, 'OK'
+
+
+def granule_id_to_cloud_url(granule_id):
+    """Build Earthdata Cloud HTTPS URL from ATL03 granule filename (no CMR needed)."""
+    m = re.match(r'ATL03_(\d{4})(\d{2})(\d{2}).*_(\d{3})_\d{2}\.h5', granule_id)
+    if not m:
+        return None
+    y, mo, d, ver = m.groups()
+    return ('https://data.nsidc.earthdatacloud.nasa.gov/nsidc-cumulus-prod-protected'
+            '/ATLAS/ATL03/%s/%s/%s/%s/%s' % (ver, y, mo, d, granule_id))
+
+
 ##########################################################################################
-def shp2geojson(shapefile, output_directory = 'geojsons/'):
     """
     Convert a shapefile to a geojson polygon file that can be used to 
     subset data from NSIDC. This already simplifies large polygons
@@ -155,8 +376,58 @@ def make_granule_list(geojson, start_date, end_date, icesheet, meltseason, list_
     
 
 ##########################################################################################
+def download_granule_cloud(granule_id, granule_output_path, uid, pwd):
+    """
+    Download a full ATL03 granule from Earthdata Cloud (CMR HTTPS link).
+    Fallback when classic NSIDC EGI is unreachable (common SSL/network issues).
+    Spatial subsetting is applied later locally by detect_lakes.
+    """
+    granule_search_url = 'https://cmr.earthdata.nasa.gov/search/granules'
+    search_params = {
+        'short_name': 'ATL03',
+        'page_size': 1,
+        'page_num': 1,
+        'producer_granule_id': granule_id,
+    }
+    data_url = None
+    try:
+        response = requests.get(granule_search_url, params=search_params,
+                                headers={'Accept': 'application/json'}, timeout=60)
+        entries = json.loads(response.content).get('feed', {}).get('entry', [])
+        if entries:
+            links = entries[0].get('links', [])
+            data_urls = [l['href'] for l in links if str(l.get('rel', '')).endswith('/data#') and str(l.get('href', '')).startswith('http')]
+            for url in data_urls:
+                if 'earthdatacloud' in url:
+                    data_url = url
+                    break
+            if data_url is None and data_urls:
+                data_url = data_urls[0]
+    except requests.RequestException as e:
+        print('CMR lookup failed (%s); using constructed cloud URL.' % type(e).__name__)
+
+    if data_url is None:
+        data_url = granule_id_to_cloud_url(granule_id)
+    if data_url is None:
+        print('No HTTPS data link found for cloud download.')
+        return 'none', 404
+
+    if not os.path.exists(granule_output_path):
+        os.makedirs(granule_output_path)
+
+    print('Downloading full granule from Earthdata Cloud (no server-side subset):')
+    print(' ', data_url)
+
+    alt = _try_earthaccess_download(granule_id, granule_output_path, uid, pwd, data_url=data_url)
+    if alt is not None:
+        return alt
+
+    return 'none', 401
+
+
+##########################################################################################
 # @profile
-def download_granule(granule_id, gtxs, geojson, granule_output_path, uid, pwd, vars_sub='default', spatial_sub=False): 
+def download_granule(granule_id, gtxs, geojson, granule_output_path, uid, pwd, vars_sub='default', spatial_sub=False):
     """
     Download a single ICESat-2 ATL03 granule based on its producer ID,
     subsets it to a given geojson file, and puts it into the specified
@@ -319,8 +590,16 @@ def download_granule(granule_id, gtxs, geojson, granule_output_path, uid, pwd, v
     
     # Create session to store cookie and pass credentials to capabilities url
     session = requests.session()
-    s = session.get(capability_url)
-    response = session.get(s.url,auth=(uid,pwd))
+    session.trust_env = False
+    try:
+        s = session.get(capability_url, timeout=15)
+        response = session.get(s.url, auth=(uid, pwd), timeout=15)
+    except (requests.exceptions.SSLError, requests.exceptions.ConnectionError,
+            requests.exceptions.ConnectTimeout, requests.exceptions.ReadTimeout) as e:
+        print('\nNSIDC EGI endpoint unreachable (%s).' % type(e).__name__)
+        print('Falling back to Earthdata Cloud full-granule download.')
+        print('Spatial subsetting will be applied locally after download.\n')
+        return download_granule_cloud(granule_id, granule_output_path, uid, pwd)
 
     try:
         root = ET.fromstring(response.content)
@@ -529,14 +808,7 @@ def print_granule_stats(photon_data, bckgrd_data, ancillary, outfile=None):
 
 ##########################################################################################
 class edc:
+    # Legacy encrypted-credential placeholders (used by detect_lakes.py download path).
+    # Listing granules via CMR does not need these. Prefer ed/edcreds.py for local runs.
     u = b"<paste your encrypted user id here>"
     p = b'<paste your encrypted password here>'
-
-    # print setup info if values have not been changed
-    if u == b"<paste your encrypted user id here>":
-        print('\n WARNING: YOU NEED TO ENCRYPT YOUR NASA EARTHDATA CREDENTIALS TO DOWNLOAD ICESAT-2 DATA!\n')
-        print('  - place your private/public keys in misc/test1 and misc/test2.')
-        print("  - use icelakes/utilities/encedc(uid, pwd, misc/test1, misc/test2) to encrypt your credentials")
-        print("  - paste the results in class edc in icelakes/nsidc")
-        print("  - the script will call icelakes/utilities/decedc to decrypt credentials")
-        print("  - when moving your code, keep your private key in a safe place (do not push to github, etc!)\n")

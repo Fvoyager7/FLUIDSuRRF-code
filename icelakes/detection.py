@@ -1943,9 +1943,9 @@ class melt_lake:
         
         # fit lakebed surface 
         npts = [100,50] if self.beam_strength=='weak' else [200,100]
-        evaldf, df_fit_bed, xv, hv = robust_npreg(df_nosurf, ext, n_iter=20, poly_degree=3, len_xatc_min=100,
-                                                  n_points=npts, resolutions=[20,final_resolution], stds=[10,3], 
-                                                  ext_buffer=200.0, full=False, init=init_guess)
+        evaldf, df_fit_bed = robust_npreg(df_nosurf, ext, n_iter=20, poly_degree=3, len_xatc_min=100,
+                                          n_points=npts, resolutions=[20,final_resolution], stds=[10,3], 
+                                          ext_buffer=200.0, full=False, init=init_guess)
 
         # add probability of being lake bed for each photon
         df['prob_bed'] = 0
@@ -2056,6 +2056,11 @@ class melt_lake:
         evaldf = evaldf[~evaldf.lat.isna()]
         evaldf = evaldf[~evaldf.lon.isna()]
 
+        if len(evaldf) == 0 or not (evaldf.conf > 0).any():
+            self.lake_quality = 0.0
+            self.max_depth = 0.0
+            return
+
         self.photon_data['prob_surf'] = df.prob_surf
         self.photon_data['prob_bed'] = df.prob_bed
         self.photon_data['is_signal'] = df.is_signal
@@ -2063,7 +2068,7 @@ class melt_lake:
         self.depth_data = evaldf[['xatc', 'lat', 'lon', 'depth', 'conf', 'h_fit_surf', 'h_fit_bed', 'std_surf', 'std_bed']].copy()
         self.surface_elevation = surf_elev
         self.lake_quality = depth_quality
-        self.max_depth = evaldf.depth[evaldf.conf>0.0].max()
+        self.max_depth = float(evaldf.depth[evaldf.conf > 0.0].max())
    
     #-------------------------------------------------------------------------------------
     def plot_lake(self, fig_dir='figs', verbose=False, print_mframe_info=True, closefig=True):

@@ -11,4 +11,11 @@ singularity_container/icelake-container_v1.sif
 *.DS_Store
 detection_out_plot/
 detection_out_data/
+detection_out_stat/
+detection_out_quicklook/
+quicklook_imagery/
+qc_quicklook/
+IS2data/
 success.txt
+# Local NASA Earthdata credentials (never commit)
+ed/edcreds.py
