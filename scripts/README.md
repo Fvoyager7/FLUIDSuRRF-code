@@ -21,16 +21,37 @@ Outputs:
 python scripts/match_is2_sentinel2_sw_2022.py
 ```
 
+Defaults (tuned for clear same-day validation imagery):
+
+- `geojsons/simplified_GRE_2000_SW.geojson`
+- search window **±3 days**
+- scene cloud cover **< 20%**
+- STAC **pagination** up to 500 candidates per granule
+
 Useful options:
 
 ```bash
-python scripts/match_is2_sentinel2_sw_2022.py --days-buffer 3 --cloud-cover-max 30
-python scripts/match_is2_sentinel2_sw_2022.py --max-granules 10   # quick test
+# Strict: only keep granules with a same-UTC-day S2 scene
+python scripts/match_is2_sentinel2_sw_2022.py --require-same-day
+
+# Quick test on 10 granules
+python scripts/match_is2_sentinel2_sw_2022.py --max-granules 10
+
+# Looser search (more candidates, more cross-day fallbacks)
+python scripts/match_is2_sentinel2_sw_2022.py --days-buffer 5 --cloud-cover-max 30
 ```
 
 Output: `granule_lists/GrIS_2022_GRE_2000_SW_is2_s2_matches.csv`
 
 Columns include `is2_time_utc`, `s2_time_utc`, `timediff_hours`, `same_day`.
+
+Filter in pandas for high-quality pairs:
+
+```python
+import pandas as pd
+df = pd.read_csv("granule_lists/GrIS_2022_GRE_2000_SW_is2_s2_matches.csv")
+good = df[df["same_day"] & df["s2_cloud_cover"].lt(10) & df["s2_id"].notna()]
+```
 
 ## 3. Run lake detection / depth retrieval locally
 
@@ -59,6 +80,9 @@ scenes.
 
 - **Same-day** in the match table means the S2 acquisition date (UTC) equals
   the ATL03 granule date. Median time offset is still several hours because
-  the satellite overpass times differ.
+  the satellite overpass times differ (pre-dawn ICESat-2 vs afternoon S2).
+- Without `--require-same-day`, the script may pick a cross-day scene when no
+  same-day candidate exists. Check the `same_day` column or pass
+  `--require-same-day` to leave those granules unmatched.
 - STAC matching is for **planning**. Final validation imagery should still
-  use the project GEE workflow in `make_quicklook_plots.ipynb`.
+  use the project GEE workflow (`make_quicklook_sw.py` or `make_quicklook_plots.ipynb`).
