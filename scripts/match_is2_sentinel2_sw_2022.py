@@ -1,0 +1,225 @@
+#!/usr/bin/env python3
+"""Match ICESat-2 ATL03 granules with nearest Sentinel-2 scenes over Greenland SW.
+
+Uses the public Element84 STAC API (no Google Earth Engine required) to build a
+candidate table of temporal matches. This is intended as a planning step before
+running detect_lakes.py and make_quicklook_plots.ipynb.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import sys
+from datetime import datetime, timedelta, timezone
+
+import geopandas as gpd
+import pandas as pd
+import requests
+
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+STAC_URL = 'https://earth-search.aws.element84.com/v1/search'
+GRANULE_RE = re.compile(r'ATL03_(\d{8})(\d{6})_')
+
+
+def parse_granule_datetime(granule_id: str) -> datetime:
+    match = GRANULE_RE.search(granule_id)
+    if not match:
+        raise ValueError(f'Cannot parse datetime from granule id: {granule_id}')
+    return datetime.strptime(match.group(1) + match.group(2), '%Y%m%d%H%M%S').replace(tzinfo=timezone.utc)
+
+
+def load_granule_table(path: str) -> pd.DataFrame:
+    df = pd.read_csv(path, header=None, names=['granule', 'geojson', 'description', 'geojson_clip'])
+    df['is2_time'] = df['granule'].map(parse_granule_datetime)
+    return df
+
+
+def study_bbox(geojson_path: str) -> list[float]:
+    gdf = gpd.read_file(geojson_path)
+    minx, miny, maxx, maxy = gdf.total_bounds
+    return [float(minx), float(miny), float(maxx), float(maxy)]
+
+
+def query_sentinel2(
+    bbox: list[float],
+    start: datetime,
+    end: datetime,
+    cloud_cover: float,
+    page_size: int,
+    max_candidates: int,
+) -> list[dict]:
+    """Query Sentinel-2 L2A via STAC, following pagination links until exhausted."""
+    payload = {
+        'collections': ['sentinel-2-l2a'],
+        'bbox': bbox,
+        'datetime': f'{start.isoformat().replace("+00:00", "Z")}/{end.isoformat().replace("+00:00", "Z")}',
+        'limit': page_size,
+        'query': {'eo:cloud_cover': {'lt': cloud_cover}},
+    }
+
+    features: list[dict] = []
+    url: str | None = STAC_URL
+    use_post = True
+
+    while url and len(features) < max_candidates:
+        if use_post:
+            response = requests.post(url, json=payload, timeout=60)
+            use_post = False
+        else:
+            response = requests.get(url, timeout=60)
+        response.raise_for_status()
+        data = response.json()
+        batch = data.get('features', [])
+        features.extend(batch)
+
+        url = None
+        for link in data.get('links', []):
+            if link.get('rel') == 'next':
+                url = link.get('href')
+                break
+        if not batch:
+            break
+
+    return features[:max_candidates]
+
+
+def best_match(is2_time: datetime, features: list[dict], require_same_day: bool = False) -> dict | None:
+    """Pick the most useful Sentinel-2 scene for optical validation.
+
+    Selection priority (best for supraglacial-lake validation):
+      1. same UTC day as the ICESat-2 overpass
+      2. lower cloud cover
+      3. smaller absolute time difference
+
+    Rationale: for lake validation a clear same-day scene is far more useful
+    than a temporally-closer but cloudy scene. This matters for pre-dawn
+    ICESat-2 overpasses, where the temporally-nearest scene can fall on the
+    previous day while the same-day (afternoon) scene is cloud-free.
+    """
+    if not features:
+        return None
+
+    candidates = []
+    for feature in features:
+        props = feature.get('properties', {})
+        s2_time = datetime.fromisoformat(props['datetime'].replace('Z', '+00:00'))
+        abs_seconds = abs((s2_time - is2_time).total_seconds())
+        cloud = props.get('eo:cloud_cover')
+        same_day = s2_time.date() == is2_time.date()
+        candidates.append({
+            's2_id': feature.get('id'),
+            's2_time': s2_time,
+            'timediff_hours': abs_seconds / 3600.0,
+            'same_day': same_day,
+            'cloud_cover': cloud,
+            'platform': props.get('platform'),
+            '_abs_seconds': abs_seconds,
+            '_cloud_sort': cloud if cloud is not None else 999.0,
+        })
+
+    if require_same_day:
+        candidates = [c for c in candidates if c['same_day']]
+        if not candidates:
+            return None
+
+    # same-day first (True sorts before False via not), then low cloud, then time
+    candidates.sort(key=lambda c: (not c['same_day'], c['_cloud_sort'], c['_abs_seconds']))
+    best = candidates[0]
+    best.pop('_abs_seconds', None)
+    best.pop('_cloud_sort', None)
+    return best
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--granule-list', default='granule_lists/GrIS_2022_GRE_2000_SW.csv')
+    parser.add_argument('--geojson', default='geojsons/simplified_GRE_2000_SW.geojson',
+                        help='Study-area GeoJSON (path relative to repo root)')
+    parser.add_argument('--days-buffer', type=int, default=3,
+                        help='Search +/- this many days around each granule (default: 3)')
+    parser.add_argument('--cloud-cover-max', type=float, default=20.0,
+                        help='Scene cloud cover must be below this %% (default: 20)')
+    parser.add_argument('--page-size', type=int, default=100,
+                        help='STAC results per API page (default: 100)')
+    parser.add_argument('--max-candidates', type=int, default=500,
+                        help='Max S2 scenes to fetch per granule across all pages (default: 500)')
+    parser.add_argument('--require-same-day', action='store_true',
+                        help='Leave match empty when no same-UTC-day S2 scene is found')
+    parser.add_argument('--max-granules', type=int, default=None, help='Process only the first N granules')
+    parser.add_argument('--out-csv', default='granule_lists/GrIS_2022_GRE_2000_SW_is2_s2_matches.csv')
+    args = parser.parse_args()
+
+    granule_path = args.granule_list if os.path.isabs(args.granule_list) else os.path.join(REPO_ROOT, args.granule_list)
+    geojson_path = args.geojson if os.path.isabs(args.geojson) else os.path.join(REPO_ROOT, args.geojson)
+    out_path = args.out_csv if os.path.isabs(args.out_csv) else os.path.join(REPO_ROOT, args.out_csv)
+
+    if not os.path.isfile(granule_path):
+        raise SystemExit(f'Granule list not found: {granule_path}')
+    if not os.path.isfile(geojson_path):
+        raise SystemExit(f'GeoJSON not found: {geojson_path}')
+
+    granules = load_granule_table(granule_path)
+    if args.max_granules is not None:
+        granules = granules.head(args.max_granules).copy()
+
+    bbox = study_bbox(geojson_path)
+    rows = []
+
+    print('Matching', len(granules), 'ICESat-2 granules against Sentinel-2 L2A')
+    print('Study bbox     :', bbox)
+    print('Days buffer    : +/-', args.days_buffer)
+    print('Cloud cover max:', args.cloud_cover_max, '%')
+    print('Require same day:', args.require_same_day)
+
+    for idx, row in granules.iterrows():
+        is2_time = row['is2_time']
+        start = is2_time - timedelta(days=args.days_buffer)
+        end = is2_time + timedelta(days=args.days_buffer)
+        features: list[dict] = []
+        match = None
+        try:
+            features = query_sentinel2(
+                bbox, start, end, args.cloud_cover_max, args.page_size, args.max_candidates,
+            )
+            match = best_match(is2_time, features, require_same_day=args.require_same_day)
+        except requests.RequestException as exc:
+            print('STAC query failed for', row['granule'], ':', exc)
+
+        rows.append({
+            'granule': row['granule'],
+            'is2_time_utc': is2_time.isoformat(),
+            'search_start_utc': start.isoformat(),
+            'search_end_utc': end.isoformat(),
+            's2_candidates': len(features),
+            's2_id': None if match is None else match['s2_id'],
+            's2_time_utc': None if match is None else match['s2_time'].isoformat(),
+            'timediff_hours': None if match is None else round(match['timediff_hours'], 3),
+            'same_day': False if match is None else match['same_day'],
+            's2_cloud_cover': None if match is None else match['cloud_cover'],
+            's2_platform': None if match is None else match['platform'],
+        })
+        if (idx + 1) % 10 == 0:
+            print(' processed', idx + 1, '/', len(granules))
+
+    out_df = pd.DataFrame(rows)
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    out_df.to_csv(out_path, index=False)
+
+    same_day = int(out_df['same_day'].fillna(False).sum())
+    matched = int(out_df['s2_id'].notna().sum())
+    print('\n=== IS2 / Sentinel-2 match table complete ===')
+    print('Output CSV     :', out_path)
+    print('Granules total :', len(out_df))
+    print('With S2 match  :', matched)
+    print('Same-day pairs :', same_day)
+    if matched:
+        print('Median |dt| (h):', round(out_df['timediff_hours'].dropna().median(), 2))
+    if args.require_same_day and matched < len(out_df):
+        skipped = len(out_df) - matched
+        print(f'No same-day S2  : {skipped} granule(s) left without a match')
+
+
+if __name__ == '__main__':
+    main()
