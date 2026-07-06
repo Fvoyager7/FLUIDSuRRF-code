@@ -72,9 +72,50 @@ python detect_lakes.py \
 
 ## 4. Satellite quicklooks after lakes are detected
 
-Use `make_quicklook_plots.ipynb` (Google Earth Engine) to download RGB
-composites and overlay ICESat-2 ground tracks on the matched Sentinel-2
-scenes.
+Use `make_quicklook_sw.py` (recommended) or `make_quicklook_plots.ipynb` (GEE) to
+download RGB composites and overlay ICESat-2 ground tracks on Sentinel-2 scenes.
+
+```bash
+python make_quicklook_sw.py --gee-project YOUR_GCP_PROJECT_ID --lake lake_xxx.h5
+```
+
+See `STEP5_QUICKLOOK.md` for setup.
+
+## 5. Modeling sample selection (IS2-S2 match + lakes)
+
+Build a granule table that flags rows with **good S2 pairing** and **detected lakes**
+for IS2–S2 depth extrapolation modeling.
+
+```bash
+# Refresh IS2-S2 match table (strict same-day)
+python scripts/match_is2_sentinel2_sw_2022.py --require-same-day
+
+# Run detection on granules with good S2 but no lakes yet
+python scripts/filter_granules_for_detection.py
+python scripts/run_sw_lake_detection.py --granule-list granule_lists/GrIS_2022_GRE_2000_SW_good_s2_todo.csv --max-jobs 3
+
+# Optional: rename lakes and export per-lake stats
+python rename_lakes_and_stats.py --execute
+
+# Merge S2 quality + lake counts into modeling candidate table
+python scripts/build_modeling_candidates.py
+```
+
+Output: `granule_lists/modeling_candidates_SW.csv`
+
+Key columns:
+
+- `good_s2_match` — same UTC day (default), cloud < 10%, |dt| < 20 h
+- `n_lakes`, `n_lakes_quality_gt0` — detect_lakes.py results for that granule
+- `modeling_ready` — `good_s2_match` and at least one lake with `lake_quality > 0`
+
+Filter high-quality training granules:
+
+```python
+import pandas as pd
+df = pd.read_csv("granule_lists/modeling_candidates_SW.csv")
+train = df[df["modeling_ready"]]
+```
 
 ## Notes
 
