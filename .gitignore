@@ -16,6 +16,7 @@ detection_out_quicklook/
 quicklook_imagery/
 qc_quicklook/
 IS2data/
+modeling/out/
 success.txt
 # Local NASA Earthdata credentials (never commit)
 ed/edcreds.py

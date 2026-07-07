@@ -101,7 +101,7 @@ python rename_lakes_and_stats.py --execute
 python scripts/build_modeling_candidates.py
 ```
 
-Output: `granule_lists/modeling_candidates_SW.csv`
+Output: `modeling/lists/modeling_candidates_SW.csv`
 
 Key columns:
 
@@ -113,9 +113,30 @@ Filter high-quality training granules:
 
 ```python
 import pandas as pd
-df = pd.read_csv("granule_lists/modeling_candidates_SW.csv")
+df = pd.read_csv("modeling/lists/modeling_candidates_SW.csv")
 train = df[df["modeling_ready"]]
 ```
+
+## 6. IS2–S2 pair extraction for depth modeling
+
+On branch `modeling/is2-s2-depth-sw-2022`. All modeling files live under
+`modeling/` — see `modeling/README.md`.
+
+```bash
+# Preview lakes / point counts (no GEE)
+python modeling/scripts/extract_is2_s2_pairs.py --dry-run
+
+# Prototype on the modeling-ready granule
+python modeling/scripts/extract_is2_s2_pairs.py --gee-project ee-wenlinshen777 --max-lakes 5
+
+# Full granule
+python modeling/scripts/extract_is2_s2_pairs.py --granule ATL03_20220714010847_03381603_007_01.h5 --gee-project ee-wenlinshen777
+```
+
+Output: `modeling/out/pairs/is2_s2_pairs_SW.csv`
+
+Columns include `depth_m`, `conf`, `S2_B2`…`S2_B12`, `S2_*_refl`, `s2_id`,
+`granule`, `lake_id`.
 
 ## Notes
 

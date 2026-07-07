@@ -46,7 +46,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--candidates-csv",
-        default=None,
+        default="modeling/lists/modeling_candidates_SW.csv",
         help="Optional modeling_candidates_SW.csv (if already built)",
     )
     parser.add_argument(

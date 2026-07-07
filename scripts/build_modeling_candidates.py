@@ -22,7 +22,7 @@ import numpy as np
 import pandas as pd
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-GRANULE_IN_NAME = re.compile(r"(ATL03_\d{8}_\d{8}_\d{3}_\d{2})\.h5")
+GRANULE_IN_NAME = re.compile(r"(ATL03_\d{14}_\d{8}_\d{3}_\d{2})")
 
 
 def granule_from_lake_filename(path: str) -> str | None:
@@ -141,7 +141,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--out-csv",
-        default="granule_lists/modeling_candidates_SW.csv",
+        default="modeling/lists/modeling_candidates_SW.csv",
         help="Output merged modeling candidate table",
     )
     parser.add_argument(
