@@ -79,6 +79,21 @@ Indices:
 Outputs: `modeling/out/models/depth_model_metrics.json` (includes `cv` and `cv_train` per model),
 `depth_cv_predictions.csv` (OOF and in-sample train predictions), `depth_model_cv_scatter.png`
 
+## Infer lake depth + uncertainty (saved RF)
+
+Apply a researcher-machine random-forest joblib (gitignored; not in git) and write
+per-row depth plus tree / CV uncertainty. Does not retrain.
+
+```bash
+# From the modeling/is2-s2-depth-* repo root
+python modeling/models/random_forest/infer_gris_lake_depth.py
+python modeling/models/random_forest/infer_gris_lake_depth.py --limit 50 --dry-run
+```
+
+Default artifacts: `modeling/out/models/random_forest/random_forest.joblib` and
+`metrics.json`. Output: `modeling/out/models/random_forest/inference/`.
+Columns and sklearn 1.9.x load notes are in the script docstring.
+
 ## Paper main figure (5 panels)
 
 Re-run training first so metrics include `cv_train` (in-sample train-fold predictions):
