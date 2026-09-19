@@ -39,7 +39,7 @@ flag_ood             1 if any feature is NaN or outside training min/max
 Optional CV residuals are read from
 ``modeling/out/models/random_forest/diagnostics/cv_predictions.csv`` (cols
 ``depth_m``, ``pred_random_forest``) or the SW file
-``modeling/out/models/depth_cv_predictions.csv``. If neither exists, 
+``modeling/out/models/depth_cv_predictions.csv``. If neither exists,
 ``resid_rmse_bin_m`` is left NaN and a note is printed.
 
 Locked training protocol (documented only; this script does not retrain):
@@ -74,7 +74,6 @@ from modeling.paths import (  # noqa: E402
     RF_METRICS_JSON,
     RF_MODEL_JOBLIB,
 )
-from modeling.scripts.train_depth_model import add_spectral_indices  # noqa: E402
 
 PRED_COL_CANDIDATES = ("pred_random_forest", "depth_pred_m", "pred")
 UNCERTAINTY_COLS = (
@@ -86,6 +85,8 @@ UNCERTAINTY_COLS = (
     "flag_ood",
 )
 BIN_WIDTH_M = 1.0
+# Inclusive training min/max plus slack so CSV float round-trip is not OOD.
+OOD_RANGE_SLACK = 1e-9
 
 
 def resolve_path(path: str) -> str:
@@ -305,6 +306,18 @@ def tree_matrix(forest, Xt: np.ndarray) -> np.ndarray:
     return np.column_stack(cols)
 
 
+def add_spectral_indices(df: pd.DataFrame) -> pd.DataFrame:
+    """NDWIice (B2,B4) and NDWI (B3,B8); same formulas as train_depth_model.py."""
+    out = df.copy()
+    rb = out["S2_B2_refl"].astype(float)
+    rr = out["S2_B4_refl"].astype(float)
+    rg = out["S2_B3_refl"].astype(float)
+    rnir = out["S2_B8_refl"].astype(float)
+    out["NDWIice"] = (rb - rr) / (rb + rr + 1e-8)
+    out["NDWI"] = (rg - rnir) / (rg + rnir + 1e-8)
+    return out
+
+
 def prepare_features(df: pd.DataFrame, features: list[str]) -> pd.DataFrame:
     out = df.copy()
     needed_idx = [f for f in features if f in ("NDWIice", "NDWI") and f not in out.columns]
@@ -321,8 +334,9 @@ def prepare_features(df: pd.DataFrame, features: list[str]) -> pd.DataFrame:
 
 
 def flag_ood_rows(X: pd.DataFrame, feat_min: pd.Series, feat_max: pd.Series) -> np.ndarray:
-    below = X.lt(feat_min)
-    above = X.gt(feat_max)
+    slack = OOD_RANGE_SLACK
+    below = X.lt(feat_min - slack)
+    above = X.gt(feat_max + slack)
     nan = X.isna()
     return (below | above | nan).any(axis=1).to_numpy(dtype=int)
 
@@ -402,7 +416,7 @@ def main(argv: list[str] | None = None) -> None:
     depth_p90 = np.full(len(df), np.nan, dtype=float)
 
     if np.any(valid):
-        Xv = X.loc[valid].to_numpy(dtype=float)
+        Xv = X.loc[valid]
         depth_pred[valid] = np.asarray(predict_est.predict(Xv), dtype=float)
         Xt = np.asarray(transform(Xv), dtype=float)
         trees = tree_matrix(forest, Xt)
